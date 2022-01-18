@@ -28,4 +28,16 @@ message TrainConfig {
 
     // GPU options
     optional bool allow_gpu_mem_growth = 11 [default = false];
+
+    // SIN related options
+    optional bool do_train_both = 12 [default = false];
+    optional bool do_train_sin = 13 [default = false];
+    optional bool do_train_sin_alt = 14 [default = false];
+    optional bool do_train_sin_fast = 15 [default = false];
+    optional uint32 n_inner_sin_fast = 16 [default = 10];
+    optional string pretrained_ckpt = 17;
+    repeated string trainable_scopes_list = 18;
+    optional float sin_level = 19  [default = 5];
+    optional string sin_type = 20  [default = 'rand'];
+    
 }

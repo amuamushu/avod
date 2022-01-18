@@ -15,6 +15,8 @@ from avod.core import constants
 from avod.datasets.kitti import kitti_aug
 from avod.datasets.kitti.kitti_utils import KittiUtils
 
+from utils_sin.sin_utils import (SINFields,genSINtoInputs,genSINtoAllInputs,
+                                 genMask2D,get_point_cloud_sub,get_stride_sub)
 
 class Sample:
     def __init__(self, name, augs):
@@ -130,6 +132,9 @@ class KittiDataset:
         # Setup utils object
         self.kitti_utils = KittiUtils(self)
 
+        self._perm = np.arange(self.num_samples)
+        self.curr_batch_list_mask_2d = None
+
     # Paths
     @property
     def rgb_image_dir(self):
@@ -224,7 +229,10 @@ class KittiDataset:
 
         return np.array(sample_names)
 
-    def load_samples(self, indices):
+    def load_samples(self, indices,
+                     sin_type=None,sin_level=None,sin_input_name=None,
+                     gen_all_sin_inputs=False,
+                     list_mask_2d=None):
         """ Loads input-output data for a set of samples. Should only be
             called when a particular sample dict is required. Otherwise,
             samples should be provided by the next_batch function
@@ -237,9 +245,14 @@ class KittiDataset:
             samples: a list of data sample dicts
         """
         sample_dicts = []
-        for sample_idx in indices:
+        for idx,sample_idx in enumerate(indices):
             sample = self.sample_list[sample_idx]
             sample_name = sample.name
+
+            if list_mask_2d:
+                mask_2d = list_mask_2d[idx]
+            else:
+                mask_2d = None
 
             # Only read labels if they exist
             if self.has_labels:
@@ -286,9 +299,26 @@ class KittiDataset:
             stereo_calib_p2 = calib_utils.read_calibration(self.calib_dir,
                                                            int(sample_name)).p2
 
-            point_cloud = self.kitti_utils.get_point_cloud(self.bev_source,
-                                                           img_idx,
-                                                           image_shape)
+            # Read lidar with subsampling (handled before other preprocessing)
+            if (sin_type == 'lowres') and (sin_input_name == 'lidar'):
+                stride_sub = get_stride_sub(sin_level)
+                point_cloud = get_point_cloud_sub(img_idx,
+                                                  self.calib_dir,
+                                                  self.velo_dir,
+                                                  image_shape,
+                                                  stride_sub)
+
+            elif (sin_type == 'lowres') and gen_all_sin_inputs:
+                stride_sub = get_stride_sub(sin_level)
+                point_cloud = get_point_cloud_sub(img_idx,
+                                                  self.calib_dir,
+                                                  self.velo_dir,
+                                                  image_shape,
+                                                  stride_sub)
+            else:
+                point_cloud = self.kitti_utils.get_point_cloud(self.bev_source,
+                                                               img_idx,
+                                                               image_shape)
 
             # Augmentation (Flipping)
             if kitti_aug.AUG_FLIPPING in sample.augs:
@@ -304,6 +334,22 @@ class KittiDataset:
             if kitti_aug.AUG_PCA_JITTER in sample.augs:
                 image_input[:, :, 0:3] = kitti_aug.apply_pca_jitter(
                     image_input[:, :, 0:3])
+
+            # Add Single Input Noise
+            if (sin_input_name in SINFields.SIN_INPUT_NAMES) and (sin_type in SINFields.VALID_SIN_TYPES):
+                image_input,point_cloud = genSINtoInputs(image_input,point_cloud,
+                                                         sin_type = sin_type,
+                                                         sin_level = sin_level,
+                                                         sin_input_name = sin_input_name,
+                                                         mask_2d = mask_2d,
+                                                         frame_calib_p2 = stereo_calib_p2)
+            # Add Input Noise to all
+            if gen_all_sin_inputs:
+                image_input,point_cloud = genSINtoAllInputs(image_input,point_cloud,
+                                                            sin_type = sin_type,
+                                                            sin_level = sin_level,
+                                                            mask_2d = mask_2d,
+                                                            frame_calib_p2 = stereo_calib_p2)
 
             if obj_labels is not None:
                 label_boxes_3d = np.asarray(
@@ -369,9 +415,12 @@ class KittiDataset:
     def _shuffle_samples(self):
         perm = np.arange(self.num_samples)
         np.random.shuffle(perm)
+        self._perm = perm
         self.sample_list = self.sample_list[perm]
 
-    def next_batch(self, batch_size, shuffle=True):
+    def next_batch(self, batch_size, shuffle=True,
+                   sin_type=None, sin_level=None, sin_input_name=None,
+                   gen_all_sin_inputs=False, get_prev_batch=False):
         """
         Retrieve the next `batch_size` samples from this data set.
 
@@ -386,41 +435,115 @@ class KittiDataset:
         # Create empty set of samples
         samples_in_batch = []
 
-        start = self._index_in_epoch
-        # Shuffle only for the first epoch
-        if self.epochs_completed == 0 and start == 0 and shuffle:
-            self._shuffle_samples()
+        if get_prev_batch:
+            # Get previously used batch
+            if batch_size <= self._index_in_epoch:
+                start = self._index_in_epoch - batch_size
 
-        # Go to the next epoch
-        if start + batch_size >= self.num_samples:
+                # Use previously generated batch of mask_2d
+                list_mask_2d = self.curr_batch_list_mask_2d
 
-            # Finished epoch
-            self.epochs_completed += 1
+                samples_in_batch.extend(self.load_samples(np.arange(start, self._index_in_epoch),
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d))
+            else:
+                if self.epochs_completed == 0:
+                    raise ValueError("Loading previous batch is impossible. This is first time")
+                prev_num_examples = batch_size - self._index_in_epoch
+                # Find indices of the previously last samples
+                start = self.num_samples - prev_num_examples
+                indices_prev = np.argsort(self._perm)[start:]
+                
+                if self.curr_batch_list_mask_2d:
+                    list_mask_2d_0 = self.curr_batch_list_mask_2d[:len(indices_prev)]
+                    list_mask_2d_1 = self.curr_batch_list_mask_2d[len(indices_prev):]
+                else:
+                    list_mask_2d_0 = None
+                    list_mask_2d_1 = None
 
-            # Get the rest examples in this epoch
-            rest_num_examples = self.num_samples - start
-
-            # Append those samples to the current batch
-            samples_in_batch.extend(
-                self.load_samples(np.arange(start, self.num_samples)))
-
-            # Shuffle the data
-            if shuffle:
+                # Append those samples to the current batch
+                samples_in_batch.extend(self.load_samples(indices_prev,
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d_0))
+                # # Append the rest of the batch
+                samples_in_batch.extend(self.load_samples(np.arange(0,self._index_in_epoch),
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d_1))
+        else:
+            start = self._index_in_epoch
+            # Shuffle only for the first epoch
+            if self.epochs_completed == 0 and start == 0 and shuffle:
                 self._shuffle_samples()
 
-            # Start next epoch
-            start = 0
-            self._index_in_epoch = batch_size - rest_num_examples
-            end = self._index_in_epoch
+            # Generate new random occlusion to fix between image and lidar
+            if sin_type == 'rect':
+                self.curr_batch_list_mask_2d = [genMask2D() for i in range(batch_size)]
+            else:
+                self.curr_batch_list_mask_2d = None
 
-            # Append the rest of the batch
-            samples_in_batch.extend(self.load_samples(np.arange(start, end)))
+            # Go to the next epoch
+            if start + batch_size >= self.num_samples:
 
-        else:
-            self._index_in_epoch += batch_size
-            end = self._index_in_epoch
+                # Finished epoch
+                self.epochs_completed += 1
 
-            # Append the samples in the range to the batch
-            samples_in_batch.extend(self.load_samples(np.arange(start, end)))
+                # Get the rest examples in this epoch
+                rest_num_examples = self.num_samples - start
 
+                if self.curr_batch_list_mask_2d:
+                    list_mask_2d_0 = self.curr_batch_list_mask_2d[:rest_num_examples]
+                    list_mask_2d_1 = self.curr_batch_list_mask_2d[rest_num_examples:]
+                else:
+                    list_mask_2d_0 = None
+                    list_mask_2d_1 = None
+
+                # Append those samples to the current batch
+                samples_in_batch.extend(self.load_samples(np.arange(start, self.num_samples),
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d_0))
+
+                # Shuffle the data
+                if shuffle:
+                    self._shuffle_samples()
+                else:
+                    self._perm = np.arange(self.num_samples)
+
+                # Start next epoch
+                start = 0
+                self._index_in_epoch = batch_size - rest_num_examples
+                end = self._index_in_epoch
+
+                # Append the rest of the batch
+                samples_in_batch.extend(self.load_samples(np.arange(start, end),
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d_1))
+
+            else:
+                self._index_in_epoch += batch_size
+                end = self._index_in_epoch
+
+                list_mask_2d = self.curr_batch_list_mask_2d
+
+                # Append the samples in the range to the batch
+                samples_in_batch.extend(self.load_samples(np.arange(start, end),
+                                                          sin_type=sin_type,
+                                                          sin_level=sin_level,
+                                                          sin_input_name=sin_input_name,
+                                                          gen_all_sin_inputs=gen_all_sin_inputs,
+                                                          list_mask_2d=list_mask_2d))
         return samples_in_batch

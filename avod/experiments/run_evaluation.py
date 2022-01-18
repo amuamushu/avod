@@ -15,8 +15,9 @@ from avod.core.models.avod_model import AvodModel
 from avod.core.models.rpn_model import RpnModel
 from avod.core.evaluator import Evaluator
 
+tf.logging.set_verbosity(tf.logging.ERROR)
 
-def evaluate(model_config, eval_config, dataset_config):
+def evaluate(model_config, eval_config, dataset_config, output_dir=None):
 
     # Parse eval config
     eval_mode = eval_config.eval_mode
@@ -77,7 +78,8 @@ def evaluate(model_config, eval_config, dataset_config):
 
         model_evaluator = Evaluator(model,
                                     dataset_config,
-                                    eval_config)
+                                    eval_config,
+                                    output_dir=output_dir)
 
         if evaluate_repeatedly:
             model_evaluator.repeated_checkpoint_run()
@@ -90,6 +92,8 @@ def main(_):
 
     default_pipeline_config_path = avod.root_dir() + \
         '/configs/avod_cars_example.config'
+
+    default_output_dir = '/data/kitti_avod/object/outputs'
 
     parser.add_argument('--pipeline_config',
                         type=str,
@@ -106,8 +110,14 @@ def main(_):
     parser.add_argument('--device',
                         type=str,
                         dest='device',
-                        default='0',
+                        default=None,
                         help='CUDA device id')
+
+    parser.add_argument('--output_dir',
+                        type=str,
+                        dest='output_dir',
+                        default=default_output_dir,
+                        help='output dir to save checkpoints')
 
     args = parser.parse_args()
 
@@ -115,15 +125,18 @@ def main(_):
     model_config, _, eval_config, dataset_config = \
         config_builder.get_configs_from_pipeline_file(
             args.pipeline_config_path,
-            is_training=False)
+            is_training=False,
+            output_dir=args.output_dir)
 
     # Overwrite data split
     dataset_config.data_split = args.data_split
 
     # Set CUDA device id
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.device
+    if args.device:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.device
 
-    evaluate(model_config, eval_config, dataset_config)
+    evaluate(model_config, eval_config, dataset_config,
+             output_dir=args.output_dir)
 
 
 if __name__ == '__main__':

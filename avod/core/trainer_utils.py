@@ -5,7 +5,6 @@ slim = tf.contrib.slim
 
 
 def load_checkpoints(checkpoint_dir, saver):
-
     # Load latest checkpoint if available
     all_checkpoint_states = tf.train.get_checkpoint_state(
         checkpoint_dir)

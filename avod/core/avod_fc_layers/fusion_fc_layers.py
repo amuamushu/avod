@@ -150,7 +150,8 @@ def _early_fusion_fc_layers(num_layers, layer_sizes,
     # Feature fusion
     fused_features = avod_fc_layer_utils.feature_fusion(fusion_method,
                                                         input_rois,
-                                                        input_weights)
+                                                        input_weights,
+                                                        is_training)
 
     # Flatten
     fc_drop = slim.flatten(fused_features)
@@ -224,7 +225,8 @@ def _late_fusion_fc_layers(num_layers, layer_sizes,
         # Feature fusion
         fused_features = avod_fc_layer_utils.feature_fusion(fusion_method,
                                                             branch_outputs,
-                                                            input_weights)
+                                                            input_weights,
+                                                            is_training)
 
         # Ouput layers
         output_layers = build_output_layers(fused_features,
@@ -247,7 +249,8 @@ def _deep_fusion_fc_layers(num_layers, layer_sizes,
     # Apply fusion
     fusion_layer = avod_fc_layer_utils.feature_fusion(fusion_method,
                                                       input_rois,
-                                                      input_weights)
+                                                      input_weights,
+                                                      is_training)
     fusion_layer = slim.flatten(fusion_layer, scope='flatten')
 
     with slim.arg_scope(
@@ -273,7 +276,8 @@ def _deep_fusion_fc_layers(num_layers, layer_sizes,
             # Apply fusion
             fusion_layer = avod_fc_layer_utils.feature_fusion(fusion_method,
                                                               all_branches,
-                                                              input_weights)
+                                                              input_weights,
+                                                              is_training)
 
         # Ouput layers
         output_layers = build_output_layers(fusion_layer,

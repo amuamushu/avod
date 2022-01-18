@@ -16,6 +16,8 @@ from avod.core import trainer_utils
 from avod.core.models.avod_model import AvodModel
 from avod.core.models.rpn_model import RpnModel
 
+from utils_sin.sin_utils import SINFields
+
 tf.logging.set_verbosity(tf.logging.INFO)
 
 KEY_SUM_RPN_OBJ_LOSS = 'sum_rpn_obj_loss'
@@ -40,7 +42,8 @@ class Evaluator:
                  eval_config,
                  skip_evaluated_checkpoints=True,
                  eval_wait_interval=30,
-                 do_kitti_native_eval=True):
+                 do_kitti_native_eval=True,
+                 output_dir=None):
         """Evaluator class for evaluating model's detection output.
 
         Args:
@@ -74,9 +77,24 @@ class Evaluator:
 
         self.do_kitti_native_eval = do_kitti_native_eval
 
+        self.output_dir=output_dir
+
         # Create a variable tensor to hold the global step
         self.global_step_tensor = tf.Variable(
             0, trainable=False, name='global_step')
+
+        # Evaluate with single input noise
+        self.do_eval_sin = self.eval_config.do_eval_sin
+        self.do_eval_ain = self.eval_config.do_eval_ain
+        if self.do_eval_sin and self.do_eval_ain:
+            raise ValueError('Evaluating Single-Input-Noise and '
+                             'All-Input-Noise cannot be done at once.')
+        self.sin_level = self.eval_config.sin_level
+        self.sin_type = self.eval_config.sin_type
+        if self.sin_type not in SINFields.VALID_SIN_TYPES:
+            raise ValueError('Single Input Noise must be one of: [{}]'.format(
+                             ', '.join(SINFields.VALID_SIN_TYPES)))
+        self.sin_repeat = self.eval_config.sin_repeat
 
         eval_mode = eval_config.eval_mode
         if eval_mode not in ['val', 'test']:
@@ -88,10 +106,17 @@ class Evaluator:
                              .format(self.checkpoint_dir))
 
         if self.do_kitti_native_eval:
-            if self.eval_config.eval_mode == 'val':
+            if self.eval_config.eval_mode in ['val','test']:
                 # Copy kitti native eval code into the predictions folder
                 evaluator_utils.copy_kitti_native_code(
-                    self.model_config.checkpoint_name)
+                    self.model_config.checkpoint_name,
+                    output_dir=self.output_dir,
+                    do_eval_sin=self.do_eval_sin,
+                    do_eval_ain=self.do_eval_ain,
+                    sin_type=self.sin_type,
+                    sin_level=self.sin_level,
+                    sin_repeat=self.sin_repeat,
+                    sin_input_names=SINFields.SIN_INPUT_NAMES)
 
         allow_gpu_mem_growth = self.eval_config.allow_gpu_mem_growth
         if allow_gpu_mem_growth:
@@ -111,7 +136,8 @@ class Evaluator:
 
             self.summary_writer, self.summary_merged = \
                 evaluator_utils.set_up_summary_writer(self.model_config,
-                                                      self._sess)
+                    self._sess, self.do_eval_sin, self.do_eval_ain,
+                    self.sin_type, self.sin_level, self.sin_repeat)
 
         else:
             self._loss_dict = None
@@ -132,7 +158,7 @@ class Evaluator:
             tf.summary.scalar('max_bytes',
                               tf.contrib.memory_stats.MaxBytesInUse())
 
-    def run_checkpoint_once(self, checkpoint_to_restore):
+    def run_checkpoint_once(self, checkpoint_to_restore, sin_input_name=None, idx_repeat=None):
         """Evaluates network metrics once over all the validation samples.
 
         Args:
@@ -143,6 +169,10 @@ class Evaluator:
 
         data_split = self.dataset_config.data_split
         predictions_base_dir = self.paths_config.pred_dir
+        if self.do_eval_sin:
+            if (sin_input_name is None) or (sin_input_name not in SINFields.SIN_INPUT_NAMES):
+                raise ValueError('sin_input_name must be provided.')
+            predictions_base_dir += '/{}'.format(sin_input_name)
 
         num_samples = self.model.dataset.num_samples
         train_val_test = self.model._train_val_test
@@ -196,7 +226,18 @@ class Evaluator:
 
             # Keep track of feed_dict speed
             start_time = time.time()
-            feed_dict = self.model.create_feed_dict()
+            if self.do_eval_sin:
+                feed_dict = self.model.create_feed_dict(
+                        sin_type = self.sin_type,
+                        sin_level = self.sin_level,
+                        sin_input_name = sin_input_name)
+            elif self.do_eval_ain:
+                feed_dict = self.model.create_feed_dict(
+                        sin_type = self.sin_type,
+                        sin_level = self.sin_level,
+                        gen_all_sin_inputs=True)
+            else:
+                feed_dict = self.model.create_feed_dict()
             feed_dict_time = time.time() - start_time
 
             # Get sample name from model
@@ -215,9 +256,24 @@ class Evaluator:
                         '/{}.txt'.format(sample_name)
 
             num_valid_samples += 1
-            print("Step {}: {} / {}, Inference on sample {}".format(
-                global_step, num_valid_samples, num_samples,
-                sample_name))
+            if idx_repeat is None:
+                print("Step {}: {} / {}, Inference on sample {}".format(
+                    global_step, num_valid_samples, num_samples,
+                    sample_name))
+            else:
+                if sin_input_name is None:
+                    print("Step {}: {} / {}, Inference on sample {} (Rep:{}/{})".format(
+                        global_step, num_valid_samples, num_samples,
+                        sample_name,idx_repeat+1,self.sin_repeat))
+                elif self.do_eval_ain:
+                    print("Step {}: {} / {}, Inference on sample {} (AIN Rep:{}/{})".format(
+                        global_step, num_valid_samples, num_samples,
+                        sample_name,idx_repeat+1,self.sin_repeat))
+                else:
+                    print("Step {}: {} / {}, Inference on sample {} ({} Rep:{}/{})".format(
+                        global_step, num_valid_samples, num_samples,
+                        sample_name,sin_input_name, idx_repeat+1,self.sin_repeat))
+
 
             # Do predictions, loss calculations, and summaries
             if validation:
@@ -330,17 +386,38 @@ class Evaluator:
                 # and when running Avod model.
                 # Store predictions in kitti format
                 if self.do_kitti_native_eval:
-                    self.run_kitti_native_eval(global_step)
+                    if self.do_eval_sin:
+                        self.run_kitti_native_eval(global_step,
+                            sin_input_name=sin_input_name,
+                            idx_repeat=idx_repeat)
+                    elif self.do_eval_ain:
+                        self.run_kitti_native_eval(global_step,
+                            idx_repeat=idx_repeat)
+                    else:
+                        self.run_kitti_native_eval(global_step)
 
         else:
             # Test mode --> train_val_test == 'test'
             evaluator_utils.print_inference_time_statistics(
                 total_feed_dict_time, total_inference_time)
+            
+            not_test = data_split in ['train','val']
+            # If dataset has labels (train/val), run kitti native evaluation
+            if self.full_model and self.do_kitti_native_eval and not_test:
+                if self.do_eval_sin:
+                    self.run_kitti_native_eval(global_step,
+                        sin_input_name=sin_input_name,
+                        idx_repeat=idx_repeat)
+                elif self.do_eval_ain:
+                    self.run_kitti_native_eval(global_step,
+                        idx_repeat=idx_repeat)
+                else:
+                    self.run_kitti_native_eval(global_step)
 
         print("Step {}: Finished evaluation, results saved to {}".format(
             global_step, prop_score_predictions_dir))
 
-    def run_latest_checkpoints(self):
+    def run_latest_checkpoints(self,force_sin_input_name = None):
         """Evaluation function for evaluating all the existing checkpoints.
         This function just runs through all the existing checkpoints.
 
@@ -371,7 +448,24 @@ class Evaluator:
                 ckpt_indices = [ckpt_idx]
             for ckpt_idx in ckpt_indices:
                 checkpoint_to_restore = self._saver.last_checkpoints[ckpt_idx]
-                self.run_checkpoint_once(checkpoint_to_restore)
+                if self.do_eval_sin:
+                    if force_sin_input_name is None:
+                        for sin_input in SINFields.SIN_INPUT_NAMES:
+                            for idx_repeat in range(self.sin_repeat):
+                                self.run_checkpoint_once(checkpoint_to_restore,
+                                                         sin_input_name=sin_input,
+                                                         idx_repeat=idx_repeat)
+                    else:
+                        for idx_repeat in range(self.sin_repeat):
+                            self.run_checkpoint_once(checkpoint_to_restore,
+                                                     sin_input_name=force_sin_input_name,
+                                                     idx_repeat=idx_repeat)
+                elif self.do_eval_ain:
+                    for idx_repeat in range(self.sin_repeat):
+                        self.run_checkpoint_once(checkpoint_to_restore,
+                                                 idx_repeat=idx_repeat)
+                else:
+                    self.run_checkpoint_once(checkpoint_to_restore)
 
         else:
             last_checkpoint_id = -1
@@ -388,8 +482,24 @@ class Evaluator:
                     number_of_evaluations = max((ckpt_idx + 1,
                                                  number_of_evaluations))
                     continue
-
-                self.run_checkpoint_once(checkpoint_to_restore)
+                if self.do_eval_sin:
+                    if force_sin_input_name is None:
+                        for sin_input in SINFields.SIN_INPUT_NAMES:
+                            for idx_repeat in range(self.sin_repeat):
+                                self.run_checkpoint_once(checkpoint_to_restore,
+                                                         sin_input_name=sin_input,
+                                                         idx_repeat=idx_repeat)
+                    else:
+                        for idx_repeat in range(self.sin_repeat):
+                            self.run_checkpoint_once(checkpoint_to_restore,
+                                                     sin_input_name=force_sin_input_name,
+                                                     idx_repeat=idx_repeat)
+                elif self.do_eval_ain:
+                    for idx_repeat in range(self.sin_repeat):
+                        self.run_checkpoint_once(checkpoint_to_restore,
+                                                 idx_repeat=idx_repeat)
+                else:
+                    self.run_checkpoint_once(checkpoint_to_restore)
                 number_of_evaluations += 1
 
                 # Save the id of the latest evaluated checkpoint
@@ -414,10 +524,11 @@ class Evaluator:
             raise ValueError('{} must have at least one checkpoint entry.'
                              .format(self.checkpoint_dir))
 
-        # Copy kitti native eval code into the predictions folder
-        if self.do_kitti_native_eval:
-            evaluator_utils.copy_kitti_native_code(
-                self.model_config.checkpoint_name)
+        # # Copy kitti native eval code into the predictions folder
+        # if self.do_kitti_native_eval:
+        #     evaluator_utils.copy_kitti_native_code(
+        #         self.model_config.checkpoint_name,
+        #         output_dir=self.output_dir)
 
         if self.skip_evaluated_checkpoints:
             already_evaluated_ckpts = self.get_evaluated_ckpts(
@@ -457,7 +568,18 @@ class Evaluator:
                                                      number_of_evaluations))
                         continue
 
-                    self.run_checkpoint_once(checkpoint_to_restore)
+                    if self.do_eval_sin:
+                        for sin_input in SINFields.SIN_INPUT_NAMES:
+                            for idx_repeat in range(self.sin_repeat):
+                                self.run_checkpoint_once(checkpoint_to_restore,
+                                                         sin_input_name=sin_input,
+                                                         idx_repeat=idx_repeat)
+                    elif self.do_eval_ain:
+                        for idx_repeat in range(self.sin_repeat):
+                            self.run_checkpoint_once(checkpoint_to_restore,
+                                                     idx_repeat=idx_repeat)
+                    else:
+                        self.run_checkpoint_once(checkpoint_to_restore)
                     number_of_evaluations += 1
 
                     # Save the id of the latest evaluated checkpoint
@@ -922,6 +1044,9 @@ class Evaluator:
         paths_config = model_config.paths_config
 
         predictions_base_dir = paths_config.pred_dir
+        if self.do_eval_sin:
+            # Check evaluated checkpoints using a subfolder image
+            predictions_base_dir += '/image'
         if model_name == 'avod_model':
             avg_loss_file_path = predictions_base_dir + '/avod_avg_losses.csv'
         else:
@@ -1165,7 +1290,7 @@ class Evaluator:
 
         return predictions_and_scores
 
-    def run_kitti_native_eval(self, global_step):
+    def run_kitti_native_eval(self, global_step, sin_input_name=None, idx_repeat=None):
         """Calls the kitti native C++ evaluation code.
 
         It first saves the predictions in kitti format. It then creates two
@@ -1185,18 +1310,32 @@ class Evaluator:
             self.model_config.checkpoint_name,
             self.dataset_config.data_split,
             self.eval_config.kitti_score_threshold,
-            global_step)
+            global_step,
+            output_dir=self.output_dir,
+            do_eval_sin=self.do_eval_sin,
+            do_eval_ain=self.do_eval_ain,
+            sin_type=self.sin_type,
+            sin_level=self.sin_level,
+            sin_repeat=self.sin_repeat,
+            sin_input_name=sin_input_name,
+            idx_repeat=idx_repeat)
 
         checkpoint_name = self.model_config.checkpoint_name
         kitti_score_threshold = self.eval_config.kitti_score_threshold
 
         # Create a separate processes to run the native evaluation
         native_eval_proc = Process(
-            target=evaluator_utils.run_kitti_native_script, args=(
-                checkpoint_name, kitti_score_threshold, global_step))
+            target=evaluator_utils.run_kitti_native_script, 
+            args=(checkpoint_name, kitti_score_threshold, global_step,
+                  self.output_dir, self.do_eval_sin, self.do_eval_ain,
+                  self.sin_type, self.sin_level, self.sin_repeat, sin_input_name, 
+                  idx_repeat, self.dataset_config.data_split))
         native_eval_proc_05_iou = Process(
             target=evaluator_utils.run_kitti_native_script_with_05_iou,
-            args=(checkpoint_name, kitti_score_threshold, global_step))
+            args=(checkpoint_name, kitti_score_threshold, global_step,
+                  self.output_dir, self.do_eval_sin, self.do_eval_ain,
+                  self.sin_type, self.sin_level, self.sin_repeat, sin_input_name, 
+                  idx_repeat, self.dataset_config.data_split))
         # Don't call join on this cuz we do not want to block
         # this will cause one zombie process - should be fixed later.
         native_eval_proc.start()

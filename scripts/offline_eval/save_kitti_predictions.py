@@ -33,6 +33,9 @@ def main():
     save_3d = True   # Save 2D and 3D predictions together
     save_alphas = True  # Save alphas (observation angles)
 
+    output_dir = '/data/kitti_avod/outputs/'
+    # output_dir = avod.root_dir() + '/data/outputs/'
+
     # Checkpoints below this are skipped
     min_step = 20000
 
@@ -42,7 +45,7 @@ def main():
 
     # Parse experiment config
     pipeline_config_file = \
-        avod.root_dir() + '/data/outputs/' + checkpoint_name + \
+        output_dir + checkpoint_name + \
         '/' + checkpoint_name + '.config'
     _, _, _, dataset_config = \
         config_builder_util.get_configs_from_pipeline_file(
@@ -60,7 +63,7 @@ def main():
                                                  use_defaults=False)
 
     # Get available prediction folders
-    predictions_root_dir = avod.root_dir() + '/data/outputs/' + \
+    predictions_root_dir = output_dir + \
         checkpoint_name + '/predictions'
 
     final_predictions_root_dir = predictions_root_dir + \

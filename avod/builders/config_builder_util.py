@@ -50,7 +50,7 @@ def get_model_config_from_file(config_path):
 
 
 def get_configs_from_pipeline_file(pipeline_config_path,
-                                   is_training):
+                                   is_training, output_dir=None):
     """Reads model configuration from a pipeline_pb2.NetworkPipelineConfig.
     Args:
         pipeline_config_path: A path directory to the network pipeline config
@@ -69,16 +69,23 @@ def get_configs_from_pipeline_file(pipeline_config_path,
         text_format.Merge(f.read(), pipeline_config)
 
     model_config = pipeline_config.model_config
+    train_config = pipeline_config.train_config
+    eval_config = pipeline_config.eval_config
+    dataset_config = pipeline_config.dataset_config
 
     # Make sure the checkpoint name matches the config filename
     config_file_name = \
         os.path.split(pipeline_config_path)[1].split('.')[0]
     checkpoint_name = model_config.checkpoint_name
-    if config_file_name != checkpoint_name:
+    if (config_file_name != checkpoint_name) and (not eval_config.do_eval_sin) and \
+        (not eval_config.do_eval_ain):
         raise ValueError('Config and checkpoint names must match.')
 
-    output_root_dir = avod.root_dir() + '/data/outputs/' + checkpoint_name
-
+    if output_dir:
+        output_root_dir = os.path.join(output_dir,checkpoint_name)
+    else:
+        output_root_dir = avod.root_dir() + '/data/outputs/' + checkpoint_name
+    
     # Construct paths
     paths_config = model_config.paths_config
     if not paths_config.checkpoint_dir:
@@ -95,10 +102,16 @@ def get_configs_from_pipeline_file(pipeline_config_path,
 
     if not paths_config.pred_dir:
         paths_config.pred_dir = output_root_dir + '/predictions'
-
-    train_config = pipeline_config.train_config
-    eval_config = pipeline_config.eval_config
-    dataset_config = pipeline_config.dataset_config
+        if eval_config.do_eval_sin:
+            paths_config.pred_dir += '_sin_{}_{}_{}'.format(
+                eval_config.sin_type,
+                eval_config.sin_level,
+                eval_config.sin_repeat)
+        elif eval_config.do_eval_ain:
+            paths_config.pred_dir += '_ain_{}_{}_{}'.format(
+                eval_config.sin_type,
+                eval_config.sin_level,
+                eval_config.sin_repeat)
 
     if is_training:
         # Copy the config to the experiments folder
