@@ -17,7 +17,6 @@ from avod.core import trainer
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
-
 def train(model_config, train_config, dataset_config):
 
     dataset = DatasetBuilder.build_kitti_dataset(dataset_config,
@@ -48,7 +47,7 @@ def main(_):
     default_pipeline_config_path = avod.root_dir() + \
         '/configs/avod_cars_example.config'
     default_data_split = 'train'
-    default_device = '1'
+    default_output_dir = '/data/kitti_avod/object/outputs'
 
     parser.add_argument('--pipeline_config',
                         type=str,
@@ -65,21 +64,29 @@ def main(_):
     parser.add_argument('--device',
                         type=str,
                         dest='device',
-                        default=default_device,
+                        default=None,
                         help='CUDA device id')
+
+    parser.add_argument('--output_dir',
+                        type=str,
+                        dest='output_dir',
+                        default=default_output_dir,
+                        help='output dir to save checkpoints')
 
     args = parser.parse_args()
 
     # Parse pipeline config
     model_config, train_config, _, dataset_config = \
         config_builder.get_configs_from_pipeline_file(
-            args.pipeline_config_path, is_training=True)
+            args.pipeline_config_path, is_training=True,
+            output_dir=args.output_dir)
 
     # Overwrite data split
     dataset_config.data_split = args.data_split
 
     # Set CUDA device id
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.device
+    if args.device:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.device
 
     train(model_config, train_config, dataset_config)
 

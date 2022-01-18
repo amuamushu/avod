@@ -651,8 +651,14 @@ class AvodModel(model.DetectionModel):
 
         return mb_mask, mb_class_label_indices, mb_gt_indices
 
-    def create_feed_dict(self):
-        feed_dict = self._rpn_model.create_feed_dict()
+    def create_feed_dict(self, sin_type=None,
+                         sin_level=None, sin_input_name=None,
+                         gen_all_sin_inputs=False,
+                         get_prev_batch=False):
+        feed_dict = self._rpn_model.create_feed_dict(
+            sin_type=sin_type,sin_level=sin_level,sin_input_name=sin_input_name,
+            gen_all_sin_inputs=gen_all_sin_inputs,
+            get_prev_batch=get_prev_batch)
         self.sample_info = self._rpn_model.sample_info
         return feed_dict
 

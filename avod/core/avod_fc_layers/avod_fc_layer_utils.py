@@ -1,4 +1,5 @@
 import tensorflow as tf
+from tensorflow.contrib import slim
 
 OFFSETS_OUTPUT_SIZE = {
     'box_3d': 6,
@@ -17,7 +18,7 @@ ANG_VECS_OUTPUT_SIZE = {
 }
 
 
-def feature_fusion(fusion_method, inputs, input_weights):
+def feature_fusion(fusion_method, inputs, input_weights,is_training=True):
     """Applies feature fusion to multiple inputs
 
     Args:
@@ -47,6 +48,21 @@ def feature_fusion(fusion_method, inputs, input_weights):
 
         elif fusion_method == 'max':
             fused_features = tf.maximum(inputs[0], inputs[1])
+
+        elif fusion_method == 'lel':
+            inputs_shape = inputs[0].get_shape()
+            last_axis = len(inputs_shape) - 1
+            fused_features = tf.concat(inputs, axis=last_axis)
+            out_depth = max(inputs[0].get_shape()[last_axis],
+                            inputs[1].get_shape()[last_axis])
+            fused_features = slim.conv2d(
+                fused_features,
+                out_depth, [1, 1],
+                scope='1x1_lel',
+                normalizer_fn=slim.batch_norm,
+                normalizer_params={
+                    'is_training': is_training},
+                weights_regularizer=tf.contrib.layers.l1_regularizer(scale=0.01))
 
         else:
             raise ValueError('Invalid fusion method', fusion_method)

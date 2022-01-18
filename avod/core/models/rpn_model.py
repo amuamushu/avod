@@ -357,6 +357,19 @@ class RpnModel(model.DetectionModel):
             elif self._fusion_method == 'concat':
                 rpn_fusion_out = tf.concat(
                     [bev_proposal_rois, img_proposal_rois], axis=3)
+            elif self._fusion_method == 'lel':
+                rpn_fusion_out = tf.concat(
+                    [bev_proposal_rois, img_proposal_rois], axis=3)
+                out_depth = max(bev_proposal_rois.get_shape()[3],
+                                img_proposal_rois.get_shape()[3])
+                rpn_fusion_out = slim.conv2d(
+                    rpn_fusion_out,
+                    out_depth, [1, 1],
+                    scope='1x1_lel',
+                    normalizer_fn=slim.batch_norm,
+                    normalizer_params={
+                        'is_training': self._is_training},
+                    weights_regularizer=tf.contrib.layers.l1_regularizer(scale=0.01))
             else:
                 raise ValueError('Invalid fusion method', self._fusion_method)
 
@@ -606,7 +619,10 @@ class RpnModel(model.DetectionModel):
 
         return predictions
 
-    def create_feed_dict(self, sample_index=None):
+    def create_feed_dict(self, sample_index=None,
+                         sin_type=None, sin_level=None, sin_input_name=None,
+                         gen_all_sin_inputs=False,
+                         get_prev_batch=False):
         """ Fills in the placeholders with the actual input values.
             Currently, only a batch size of 1 is supported
 
@@ -635,12 +651,22 @@ class RpnModel(model.DetectionModel):
             while not valid_sample:
                 if self._train_val_test == "train":
                     # Get the a random sample from the remaining epoch
-                    samples = self.dataset.next_batch(batch_size=1)
+                    samples = self.dataset.next_batch(batch_size=1,
+                                                      sin_type=sin_type,
+                                                      sin_level=sin_level,
+                                                      sin_input_name=sin_input_name,
+                                                      gen_all_sin_inputs=gen_all_sin_inputs,
+                                                      get_prev_batch=get_prev_batch)
 
                 else:  # self._train_val_test == "val"
                     # Load samples in order for validation
                     samples = self.dataset.next_batch(batch_size=1,
-                                                      shuffle=False)
+                                                      shuffle=False,
+                                                      sin_type=sin_type,
+                                                      sin_level=sin_level,
+                                                      sin_input_name=sin_input_name,
+                                                      gen_all_sin_inputs=gen_all_sin_inputs,
+                                                      get_prev_batch=get_prev_batch)
 
                 # Only handle one sample at a time for now
                 sample = samples[0]
@@ -661,9 +687,18 @@ class RpnModel(model.DetectionModel):
         else:
             # For testing, any sample should work
             if sample_index is not None:
-                samples = self.dataset.load_samples([sample_index])
+                samples = self.dataset.load_samples([sample_index],
+                                                    sin_type=sin_type,
+                                                    sin_level=sin_level,
+                                                    sin_input_name=sin_input_name,
+                                                    gen_all_sin_inputs=gen_all_sin_inputs)
             else:
-                samples = self.dataset.next_batch(batch_size=1, shuffle=False)
+                samples = self.dataset.next_batch(batch_size=1, shuffle=False,
+                                                  sin_type=sin_type,
+                                                  sin_level=sin_level,
+                                                  sin_input_name=sin_input_name,
+                                                  gen_all_sin_inputs=gen_all_sin_inputs,
+                                                  get_prev_batch=get_prev_batch)
 
             # Only handle one sample at a time for now
             sample = samples[0]

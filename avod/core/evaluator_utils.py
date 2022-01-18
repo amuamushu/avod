@@ -19,18 +19,35 @@ def save_predictions_in_kitti_format(model,
                                      checkpoint_name,
                                      data_split,
                                      score_threshold,
-                                     global_step):
+                                     global_step,
+                                     output_dir=None,
+                                     do_eval_sin=False,
+                                     do_eval_ain=False,
+                                     sin_type='rand',
+                                     sin_level=5,
+                                     sin_repeat=10,
+                                     sin_input_name=None,
+                                     idx_repeat=None):
     """ Converts a set of network predictions into text files required for
     KITTI evaluation.
     """
+
+    if output_dir is None:
+        output_dir = avod.root_dir() + '/data/outputs/'
 
     dataset = model.dataset
     # Round this because protobuf encodes default values as full decimal
     score_threshold = round(score_threshold, 3)
 
     # Get available prediction folders
-    predictions_root_dir = avod.root_dir() + '/data/outputs/' + \
-        checkpoint_name + '/predictions'
+    predictions_root_dir = os.path.join(output_dir,checkpoint_name) + \
+        '/predictions'
+    if do_eval_sin:
+        predictions_root_dir += '_sin_{}_{}_{}/{}'.format(
+            sin_type, sin_level, sin_repeat, sin_input_name)
+    elif do_eval_ain:
+        predictions_root_dir += '_ain_{}_{}_{}'.format(
+            sin_type, sin_level, sin_repeat)
 
     final_predictions_root_dir = predictions_root_dir + \
         '/final_predictions_and_scores/' + dataset.data_split
@@ -39,10 +56,16 @@ def save_predictions_in_kitti_format(model,
         '/' + str(global_step)
 
     # 3D prediction directories
-    kitti_predictions_3d_dir = predictions_root_dir + \
-        '/kitti_native_eval/' + \
-        str(score_threshold) + '/' + \
-        str(global_step) + '/data'
+    if idx_repeat is None:
+        kitti_predictions_3d_dir = predictions_root_dir + \
+            '/kitti_native_eval/' + \
+            str(score_threshold) + '_' + data_split + '/' + \
+            str(global_step)  + '/data'
+    else:
+        kitti_predictions_3d_dir = predictions_root_dir + \
+            '/kitti_native_eval/' + \
+            str(score_threshold) + '_' + data_split + '_{}_rep/'.format(idx_repeat) + \
+            str(global_step) + '/data'
 
     if not os.path.exists(kitti_predictions_3d_dir):
         os.makedirs(kitti_predictions_3d_dir)
@@ -181,7 +204,12 @@ def save_predictions_in_kitti_format(model,
 
 
 def set_up_summary_writer(model_config,
-                          sess):
+                          sess,
+                          do_eval_sin=False,
+                          do_eval_ain=False,
+                          sin_type='rand',
+                          sin_level=5,
+                          sin_repeat=10):
     """ Helper function to set up log directories and summary
         handlers.
     Args:
@@ -196,6 +224,12 @@ def set_up_summary_writer(model_config,
         os.makedirs(logdir)
 
     logdir = logdir + '/eval'
+    if do_eval_sin:
+        logdir += '_sin_{}_{}_{}'.format(
+            sin_type, sin_level, sin_repeat)
+    elif do_eval_ain:
+        logdir += '_ain_{}_{}_{}'.format(
+            sin_type, sin_level, sin_repeat)
 
     datetime_str = str(datetime.datetime.now())
     summary_writer = tf.summary.FileWriter(logdir + '/' + datetime_str,
@@ -246,84 +280,210 @@ def print_inference_time_statistics(total_feed_dict_time,
     print('Median: ', np.round(np.median(total_inference_time), 5))
 
 
-def copy_kitti_native_code(checkpoint_name):
+def copy_kitti_native_code(checkpoint_name,output_dir=None,
+                           do_eval_sin=False, do_eval_ain=False,
+                           sin_type='rand',
+                           sin_level=5,sin_repeat=10,
+                           sin_input_names=None):
     """Copies and compiles kitti native code.
 
     It also creates neccessary directories for storing the results
     of the kitti native evaluation code.
     """
 
-    avod_root_dir = avod.root_dir()
-    kitti_native_code_copy = avod_root_dir + '/data/outputs/' + \
-        checkpoint_name + '/predictions/kitti_native_eval/'
+    if output_dir is None:
+        output_dir = avod.root_dir() + '/data/outputs/'
+
+    if do_eval_sin:
+        if sin_input_names is None:
+            raise ValueError('{} must have list of sin input names.'
+                             .format(sin_input_names))
+        kitti_native_code_copies = [os.path.join(output_dir,checkpoint_name) + \
+                '/predictions_sin_{}_{}_{}/{}/kitti_native_eval/'.format(
+                    sin_type, sin_level, sin_repeat,sin_input_name) \
+                for sin_input_name in sin_input_names]
+    elif do_eval_ain:
+        kitti_native_code_copies = [os.path.join(output_dir,checkpoint_name) + \
+            '/predictions_ain_{}_{}_{}/kitti_native_eval/'.format(
+                sin_type, sin_level, sin_repeat)]
+    else:
+        kitti_native_code_copies = [os.path.join(output_dir,checkpoint_name) + \
+            '/predictions/kitti_native_eval/']
 
     # Only copy if the code has not been already copied over
-    if not os.path.exists(kitti_native_code_copy):
+    for (idx,kitti_native_code_copy) in enumerate(kitti_native_code_copies):
+        if not os.path.exists(kitti_native_code_copy):
+            os.makedirs(kitti_native_code_copy)
+            original_kitti_native_code = avod.top_dir() + \
+                '/scripts/offline_eval/kitti_native_eval/'
 
-        os.makedirs(kitti_native_code_copy)
-        original_kitti_native_code = avod.top_dir() + \
-            '/scripts/offline_eval/kitti_native_eval/'
+            if do_eval_sin:
+                predictions_dir = os.path.join(output_dir,checkpoint_name) + \
+                    '/predictions_sin_{}_{}_{}/{}/'.format(
+                        sin_type, sin_level, sin_repeat,sin_input_names[idx])
+            elif do_eval_ain:
+                predictions_dir = os.path.join(output_dir,checkpoint_name) + \
+                    '/predictions_ain_{}_{}_{}/'.format(
+                        sin_type, sin_level, sin_repeat)
+            else:
+                predictions_dir = os.path.join(output_dir,checkpoint_name) + \
+                    '/predictions/'
+            # create dir for it first
+            dir_util.copy_tree(original_kitti_native_code,
+                               kitti_native_code_copy)
+            # run the script to compile the c++ code
+            script_folder = predictions_dir + \
+                'kitti_native_eval/'
+            make_script = script_folder + 'run_make.sh'
+            subprocess.call([make_script, script_folder])
 
-        predictions_dir = avod_root_dir + '/data/outputs/' + \
-            checkpoint_name + '/predictions/'
-        # create dir for it first
-        dir_util.copy_tree(original_kitti_native_code,
-                           kitti_native_code_copy)
-        # run the script to compile the c++ code
-        script_folder = predictions_dir + \
-            '/kitti_native_eval/'
-        make_script = script_folder + 'run_make.sh'
-        subprocess.call([make_script, script_folder])
+        # Set up the results folders if they don't exist
+        if output_dir is None:
+            results_dir = avod.top_dir() + '/scripts/offline_eval/results'
+            results_05_dir = avod.top_dir() + '/scripts/offline_eval/results_05_iou'
+        else:
+            results_dir = os.path.join(output_dir,checkpoint_name) + '/offline_eval/results'
+            results_05_dir = os.path.join(output_dir,checkpoint_name) + '/offline_eval/results_05_iou'
+        if do_eval_sin:
+            results_dir += '_sin_{}_{}_{}/{}'.format(
+                sin_type, sin_level, sin_repeat, sin_input_names[idx])
+            results_05_dir += '_sin_{}_{}_{}/{}'.format(
+                sin_type, sin_level, sin_repeat, sin_input_names[idx])
+        elif do_eval_ain:
+            results_dir += '_ain_{}_{}_{}'.format(
+                sin_type, sin_level, sin_repeat)
+            results_05_dir += '_ain_{}_{}_{}'.format(
+                sin_type, sin_level, sin_repeat)
 
-    # Set up the results folders if they don't exist
-    results_dir = avod.top_dir() + '/scripts/offline_eval/results'
-    results_05_dir = avod.top_dir() + '/scripts/offline_eval/results_05_iou'
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
-    if not os.path.exists(results_05_dir):
-        os.makedirs(results_05_dir)
+        if not os.path.exists(results_dir):
+            os.makedirs(results_dir)
+        if not os.path.exists(results_05_dir):
+            os.makedirs(results_05_dir)
 
 
-def run_kitti_native_script(checkpoint_name, score_threshold, global_step):
+def run_kitti_native_script(checkpoint_name, score_threshold, global_step,
+                            output_dir=None, do_eval_sin=False, do_eval_ain=False,
+                            sin_type='rand', sin_level=5, sin_repeat=10,
+                            sin_input_name=None, idx_repeat=None, data_split=None):
     """Runs the kitti native code script."""
 
-    eval_script_dir = avod.root_dir() + '/data/outputs/' + \
-        checkpoint_name + '/predictions'
+    if output_dir is None:
+        output_dir = avod.root_dir() + '/data/outputs/'
+
+    eval_script_dir = os.path.join(output_dir,checkpoint_name) + \
+        '/predictions'
+    if do_eval_sin:
+        eval_script_dir += '_sin_{}_{}_{}/{}'.format(
+            sin_type, sin_level, sin_repeat, sin_input_name)
+    elif do_eval_ain:
+        eval_script_dir += '_ain_{}_{}_{}'.format(
+            sin_type, sin_level, sin_repeat)
     make_script = eval_script_dir + \
         '/kitti_native_eval/run_eval.sh'
     script_folder = eval_script_dir + \
         '/kitti_native_eval/'
 
-    results_dir = avod.top_dir() + '/scripts/offline_eval/results/'
+    if output_dir is None:
+        if do_eval_sin:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results_sin_{}_{}_{}/{}/'.format(
+                    sin_type, sin_level, sin_repeat, sin_input_name)
+        elif do_eval_ain:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results_ain_{}_{}_{}/'.format(
+                    sin_type, sin_level, sin_repeat)
+        else:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results/'
+    else:
+        if do_eval_sin:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results_sin_{}_{}_{}/{}/'.format(
+                    sin_type, sin_level, sin_repeat,sin_input_name)
+        elif do_eval_ain:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results_ain_{}_{}_{}/'.format(
+                    sin_type, sin_level, sin_repeat)
+        else:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results/'
 
     # Round this because protobuf encodes default values as full decimal
     score_threshold = round(score_threshold, 3)
 
+    if idx_repeat is None:
+        offline_res_name = str(score_threshold) + '_' + data_split
+    else:
+        # result dir is different
+        offline_res_name = str(score_threshold)+ '_' + data_split + \
+                           '_{}_rep'.format(idx_repeat)
+    
     subprocess.call([make_script, script_folder,
-                     str(score_threshold),
+                     offline_res_name,
                      str(global_step),
                      str(checkpoint_name),
                      str(results_dir)])
 
 
-def run_kitti_native_script_with_05_iou(checkpoint_name, score_threshold,
-                                        global_step):
+def run_kitti_native_script_with_05_iou(checkpoint_name, score_threshold, global_step,
+                                        output_dir=None, do_eval_sin=False, do_eval_ain=False,
+                                        sin_type='rand', sin_level=5, sin_repeat=10,
+                                        sin_input_name=None, idx_repeat=None, data_split=None):
     """Runs the kitti native code script."""
 
-    eval_script_dir = avod.root_dir() + '/data/outputs/' + \
-        checkpoint_name + '/predictions'
+    if output_dir is None:
+        output_dir = avod.root_dir() + '/data/outputs/'
+
+    eval_script_dir = os.path.join(output_dir,checkpoint_name) + \
+        '/predictions'
+    if do_eval_sin:
+        eval_script_dir += '_sin_{}_{}_{}/{}'.format(
+            sin_type, sin_level, sin_repeat, sin_input_name)
+    elif do_eval_ain:
+        eval_script_dir += '_ain_{}_{}_{}'.format(
+            sin_type, sin_level, sin_repeat)
     make_script = eval_script_dir + \
         '/kitti_native_eval/run_eval_05_iou.sh'
     script_folder = eval_script_dir + \
         '/kitti_native_eval/'
 
-    results_dir = avod.top_dir() + '/scripts/offline_eval/results_05_iou/'
+    if output_dir is None:
+        if do_eval_sin:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results_05_iou_sin_{}_{}_{}/{}/'.format(
+                    sin_type, sin_level, sin_repeat, sin_input_name)
+        elif do_eval_ain:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results_05_iou_ain_{}_{}_{}/'.format(
+                    sin_type, sin_level, sin_repeat)
+        else:
+            results_dir = avod.top_dir() + \
+                '/scripts/offline_eval/results_05_iou/'
+    else:
+        if do_eval_sin:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results_05_iou_sin_{}_{}_{}/{}/'.format(
+                    sin_type, sin_level, sin_repeat, sin_input_name)
+        elif do_eval_ain:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results_05_iou_ain_{}_{}_{}/'.format(
+                    sin_type, sin_level, sin_repeat)
+        else:
+            results_dir = os.path.join(output_dir,checkpoint_name) + \
+                '/offline_eval/results_05_iou/'
 
     # Round this because protobuf encodes default values as full decimal
     score_threshold = round(score_threshold, 3)
 
+    if idx_repeat is None:
+        offline_res_name = str(score_threshold) + '_' + data_split
+    else:
+        # result dir is different
+        offline_res_name = str(score_threshold)+ '_' + data_split + \
+                           '_{}_rep'.format(idx_repeat)
+    
     subprocess.call([make_script, script_folder,
-                     str(score_threshold),
+                     offline_res_name,
                      str(global_step),
                      str(checkpoint_name),
                      str(results_dir)])
